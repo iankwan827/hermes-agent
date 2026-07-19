@@ -4273,9 +4273,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     e,
                 )
 
+    def _auto_save_session(self, agent) -> None:
+        """保存agent的对话到last_session.json，供新session读取恢复上下文"""
+        try:
+            _msgs = getattr(agent, '_session_messages', None) or []
+            if _msgs:
+                import json as _json
+                from pathlib import Path as _Path
+                from hermes_constants import get_hermes_home as _gkh
+                _save_dir = _gkh() / "last_session_context"
+                _save_dir.mkdir(exist_ok=True)
+                _save_file = _save_dir / "last_session.json"
+                _clean = [m for m in _msgs if m.get("role") in ("user", "assistant") and m.get("content")]
+                _clean = _clean[-100:]
+                with open(_save_file, "w", encoding="utf-8") as _f:
+                    _json.dump(_clean, _f, ensure_ascii=False, indent=1)
+                logger.info("Session context saved: %d messages -> %s", len(_clean), _save_file)
+        except Exception as _save_err:
+            logger.debug("Failed to save session context: %s", _save_err)
+
     def _finalize_shutdown_agents(self, active_agents: Dict[str, Any]) -> None:
         for agent in active_agents.values():
             try:
+                # === AUTO-SAVE: 保存shutdown时的对话 ===
+                self._auto_save_session(agent)
+                # === END AUTO-SAVE ===
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
                 _invoke_hook(
                     "on_session_finalize",
@@ -5693,6 +5715,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if _cached_agent is None:
                             _cached_agent = self._running_agents.get(key)
                         if _cached_agent and _cached_agent is not _AGENT_PENDING_SENTINEL:
+                            # === AUTO-SAVE: 保存超时session的对话 ===
+                            self._auto_save_session(_cached_agent)
+                            # === END AUTO-SAVE ===
                             self._cleanup_agent_resources(_cached_agent)
                         # Drop the cache entry so the AIAgent (and its LLM
                         # clients, tool schemas, memory provider refs) can
@@ -6210,6 +6235,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _agent = (
                         _entry[0] if isinstance(_entry, tuple) else _entry
                     )
+                    # === AUTO-SAVE: 保存idle agent的对话 ===
+                    self._auto_save_session(_agent)
+                    # === END AUTO-SAVE ===
                     self._cleanup_agent_resources(_agent)
 
             for platform, adapter in list(self.adapters.items()):
